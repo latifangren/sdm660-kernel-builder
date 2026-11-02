@@ -1,0 +1,81 @@
+name: Build SDM660 Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Pilih branch dari sdm660-mainline/linux:'
+        type: choice
+        required: true
+        default: 'setotau/qcom-sdm660-7.2.y-ipa2-lite'
+        options:
+          - 'setotau/qcom-sdm660-7.2.y-ipa2-lite'
+          - 'qcom-sdm660-7.2.y'
+          - 'custom'
+      custom_branch:
+        description: 'Nama branch lain (hanya diisi jika memilih opsi "custom"):'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine Branch
+        id: select_branch
+        run: |
+          if [ "${{ github.event.inputs.target_branch }}" = "custom" ]; then
+            SELECTED="${{ github.event.inputs.custom_branch }}"
+          else
+            SELECTED="${{ github.event.inputs.target_branch }}"
+          fi
+          echo "branch=$SELECTED" >> $GITHUB_OUTPUT
+          SAFE_NAME=$(echo "$SELECTED" | tr '/' '_')
+          echo "safe_name=$SAFE_NAME" >> $GITHUB_OUTPUT
+          echo "Target Branch: $SELECTED"
+
+      - name: Checkout Source from upstream sdm660-mainline/linux
+        uses: actions/checkout@v4
+        with:
+          repository: 'sdm660-mainline/linux'
+          ref: ${{ steps.select_branch.outputs.branch }}
+          fetch-depth: 1
+
+      - name: Get Commit SHA
+        id: get_info
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "Commit SHA: $SHA"
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            bison flex libssl-dev libelf-dev bc kmod zstd
+
+      - name: Configure Kernel
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig sdm660_defconfig
+
+      - name: Build Kernel Image & DTBs
+        run: |
+          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- Image.gz dtbs
+
+      - name: Build & Package Modules
+        run: |
+          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
+          mkdir -p output/boot
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=output/modules INSTALL_MOD_STRIP=1 modules_install
+          cp arch/arm64/boot/Image.gz output/boot/
+          find arch/arm64/boot/dts/qcom/ -name "*whyred*.dtb" -exec cp {} output/boot/ \;
+          find arch/arm64/boot/dts/qcom/ -name "*sdm660*.dtb" -exec cp {} output/boot/ \;
+          tar -czf sdm660-kernel-build.tar.gz -C output .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ steps.select_branch.outputs.safe_name }}-${{ steps.get_info.outputs.sha }}
+          path: sdm660-kernel-build.tar.gz
+          retention-days: 14
